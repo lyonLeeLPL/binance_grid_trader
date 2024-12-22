@@ -6,7 +6,7 @@ from gridtrader.trader.utility import floor_to
 from gridtrader.trader.object import OrderData, TickData, TradeData, ContractData
 from .template import CtaTemplate
 from gridtrader.trader.utility import GridPositionCalculator
-
+from utils.contract_handler import ContractHandler
 
 class FutureGridStrategy(CtaTemplate):
     """
@@ -148,6 +148,8 @@ class FutureGridStrategy(CtaTemplate):
 
                 for i in range(self.max_open_orders):
                     price = self.bottom_price + (mid_count - i - 1) * self.step_price
+                    _ContractHandler = ContractHandler(self.contract_data.price_tick)
+                    price = _ContractHandler.process_price(price)
                     if price < self.bottom_price:
                         return
 
@@ -158,6 +160,8 @@ class FutureGridStrategy(CtaTemplate):
             if len(self.short_orders_dict.keys()) == 0:
                 for i in range(self.max_open_orders):
                     price = self.bottom_price + (mid_count + i + 1) * self.step_price
+                    _ContractHandler = ContractHandler(self.contract_data.price_tick)
+                    price = _ContractHandler.process_price(price)
                     if price > self.upper_price:
                         return
 
