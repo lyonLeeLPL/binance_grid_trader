@@ -103,12 +103,16 @@ class FutureGridStrategy(CtaTemplate):
             # 计算每个网格的币数量
             self.price_volume_dict = {}
             total_amount = 0
+            self.lower_grid_total_volume = 0.0  # 重置下方网格的总下单量
+            self.upper_grid_total_volume = 0.0  # 重置上方网格的总下单量
             for i in range(self.grid_number):
                 price = self.bottom_price + i * self.step_price
                 if i < lower_grid_number:
                     volume = lower_grid_amount / price  # 金额转换为币数量
+                    self.lower_grid_total_volume += volume  # 累加下方网格的总下单量
                 else:
                     volume = upper_grid_amount / price  # 金额转换为币数量
+                    self.upper_grid_total_volume += volume  # 累加上方网格的总下单量
 
                 # 根据 min_volume 保留小数位数
                 volume = float(Decimal(volume).quantize(Decimal(quantize_str), rounding=ROUND_DOWN))
@@ -136,11 +140,16 @@ class FutureGridStrategy(CtaTemplate):
                 self.price_volume_dict[price] = float(
                     Decimal(self.price_volume_dict[price] * scale_factor).quantize(Decimal(quantize_str),
                                                                                    rounding=ROUND_DOWN))
+            # 按比例调整下方和上方网格的总下单量
+            self.lower_grid_total_volume *= scale_factor
+            self.upper_grid_total_volume *= scale_factor
 
         self.write_log(
             f"Calculated Parameters: Upper Price: {self.upper_price}, Bottom Price: {self.bottom_price}, "
             f"Grid Number: {self.grid_number}, Step Price: {self.step_price}, "
             f"Price Volume Dict: {self.price_volume_dict}, "
+            f"Lower Grid Total Volume: {self.lower_grid_total_volume}, "
+            f"Upper Grid Total Volume: {self.upper_grid_total_volume}, "
             f"Mode: {'Long' if self.direction_int == 1 else 'Short'}")
 
     # def get_min_volume(self, vt_symbol):
