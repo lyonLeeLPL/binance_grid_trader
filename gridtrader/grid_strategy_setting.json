@@ -1,26 +1,16 @@
 {
-    "BTCBUSD": {
+    "BTC": {
         "class_name": "FutureGridStrategy",
-        "vt_symbol": "BTCBUSD.BINANCE",
+        "vt_symbol": "BTCUSDT.BINANCE",
         "setting": {
-            "upper_price": 42000,
-            "bottom_price": 39000,
-            "grid_number": 100,
-            "order_volume": 0.001,
-            "max_open_orders": 5
-        }
-    },
-    "btcbusd": {
-        "class_name": "SpotGridStrategy",
-        "vt_symbol": "btcbusd.BINANCE",
-        "setting": {
-            "class_name": "SpotGridStrategy",
-            "upper_price": 42000.0,
-            "bottom_price": 32000.0,
-            "grid_number": 50,
-            "order_volume": 0.001,
-            "invest_coin": "BUSD",
-            "max_open_orders": 5
+            "upper_price": 110000.0,
+            "bottom_price": 100000.0,
+            "grid_number": 10,
+            "order_volume": 0.05,
+            "max_open_orders": 5,
+            "order_amount": 5000,
+            "start_price": 106000.0,
+            "direction_int": 1
         }
     }
 }
