@@ -1,6 +1,8 @@
 from decimal import Decimal, ROUND_DOWN
 from typing import Union, Optional
 
+import ccxt
+
 from gridtrader.trader.object import OrderData, TickData, TradeData, ContractData
 from gridtrader.trader.object import Status
 from gridtrader.trader.utility import GridPositionCalculator
@@ -23,7 +25,6 @@ class FutureGridStrategy(CtaTemplate):
     upper_price = 0.0  # 策略最高价
     bottom_price = 0.0  # 策略最低价
     grid_number = 100  # 网格数量
-    order_volume = 0.05  # 每次下单数量
     max_open_orders = 5  # 最大同时挂单数
     order_amount = 5000  # 下单总金额
     start_price = 0.0  # 启动价格
@@ -38,8 +39,7 @@ class FutureGridStrategy(CtaTemplate):
     lower_grid_total_volume = 0.0  # 下方网格的总下单量
     upper_grid_total_volume = 0.0  # 上方网格的总下单量
 
-    parameters = ["upper_price", "bottom_price", "grid_number", "order_volume", "max_open_orders", "order_amount",
-                  "start_price", "direction_int"]
+    parameters = ["upper_price", "bottom_price", "max_open_orders", "order_amount", "start_price", "direction_int"]
     variables = ["avg_price", "step_price", "trade_times", "price_volume_dict", "start_price_triggered",
                  "lower_grid_total_volume", "upper_grid_total_volume"]
 
@@ -80,13 +80,19 @@ class FutureGridStrategy(CtaTemplate):
         if price_range <= 0:
             raise ValueError("价格区间设置错误，上限价格必须大于下限价格。")
 
+        if self.vt_symbol.split(".")[0] == "BTCUSDT":
+            rate = 0.004
+        else:
+            rate = 0.007
+
         # 初始网格数量
-        self.grid_number = max(1, int(price_range / (self.bottom_price * 0.006)))  # 初始网格数量基于0.6%间距
+        grid_spacing = self.upper_price * rate  # 网格间距为下限价格的 0.6%
+        self.grid_number = max(1, int(price_range / grid_spacing))  # 初始网格数量
 
         # 调整网格数量，确保每个网格的币数量满足最小下单数量
         while True:
             # 计算网格间距
-            self.step_price = price_range / self.grid_number
+            self.step_price = self._ContractHandler.process_price(price_range / self.grid_number)
 
             # 计算下方网格和上方网格的数量
             lower_grid_number = self.grid_number // 2
@@ -152,6 +158,8 @@ class FutureGridStrategy(CtaTemplate):
             f"Upper Grid Total Volume: {self.upper_grid_total_volume}, "
             f"Mode: {'Long' if self.direction_int == 1 else 'Short'}")
 
+        # 计算价格变化率
+        self.calculate_price_change_rate()
     # def get_min_volume(self, vt_symbol):
     #     """获取最小下单数量"""
     #     symbol = vt_symbol.split(".")[0]
@@ -168,6 +176,7 @@ class FutureGridStrategy(CtaTemplate):
         self.contract_data = self.cta_engine.main_engine.get_contract(self.vt_symbol)
         """策略启动回调"""
         self.calculate_grid_parameters()
+        # self.avoid_finished_orders()
         self.write_log(f"Calculated Parameters: Upper Price: {self.upper_price}, Bottom Price: {self.bottom_price}, "
                        f"Grid Number: {self.grid_number}, Step Price: {self.step_price}, "
                        f"Price Volume Dict: {self.price_volume_dict}")
@@ -235,9 +244,6 @@ class FutureGridStrategy(CtaTemplate):
                     if volume is None:
                         continue  # 如果价格不在字典中，跳过
 
-                    if price in self.fake_active_orders_price_list:
-                        continue
-
                     # 下单
                     orders_ids = self.buy(price, volume)
                     for orderid in orders_ids:
@@ -249,9 +255,6 @@ class FutureGridStrategy(CtaTemplate):
                     volume = self.price_volume_dict.get(price)
                     if volume is None:
                         continue  # 如果价格不在字典中，跳过
-
-                    if price in self.fake_active_orders_price_list:
-                        continue
 
                     # 下单
                     orders_ids = self.short(price, volume)
@@ -273,9 +276,9 @@ class FutureGridStrategy(CtaTemplate):
 
                 short_price = float(order.price) + float(self.step_price)
                 if short_price <= self.upper_price:
-                    short_price = _ContractHandler.process_price(short_price)
-                    volume = self.price_volume_dict.get(short_price, self.order_volume)
-                    orders_ids = self.short(short_price, volume, False)
+                    ## 方式3：使用 min() 找最接近的价格
+                    closest_price, volume = self.getVolume(short_price)
+                    orders_ids = self.short(closest_price, volume)
                     for orderid in orders_ids:
                         self.short_orders_dict[orderid] = short_price
 
@@ -283,9 +286,9 @@ class FutureGridStrategy(CtaTemplate):
                     count = len(self.long_orders_dict.keys()) + 1
                     long_price = float(order.price) - float(self.step_price) * count
                     if long_price >= self.bottom_price:
-                        long_price = _ContractHandler.process_price(long_price)
-                        volume = self.price_volume_dict.get(long_price, self.order_volume)
-                        orders_ids = self.buy(long_price, volume, False)
+                        ## 方式3：使用 min() 找最接近的价格
+                        closest_price, volume = self.getVolume(long_price)
+                        orders_ids = self.buy(closest_price, volume)
                         for orderid in orders_ids:
                             self.long_orders_dict[orderid] = long_price
 
@@ -295,9 +298,9 @@ class FutureGridStrategy(CtaTemplate):
 
                 long_price = float(order.price) - float(self.step_price)
                 if long_price >= self.bottom_price:
-                    long_price = _ContractHandler.process_price(long_price)
-                    volume = self.price_volume_dict.get(long_price, self.order_volume)
-                    orders_ids = self.buy(long_price, volume)
+                    ## 方式3：使用 min() 找最接近的价格
+                    closest_price, volume = self.getVolume(long_price)
+                    orders_ids = self.buy(closest_price, volume)
                     for orderid in orders_ids:
                         self.long_orders_dict[orderid] = long_price
 
@@ -305,9 +308,9 @@ class FutureGridStrategy(CtaTemplate):
                     count = len(self.short_orders_dict.keys()) + 1
                     short_price = float(order.price) + float(self.step_price) * count
                     if short_price <= self.upper_price:
-                        short_price = _ContractHandler.process_price(short_price)
-                        volume = self.price_volume_dict.get(short_price, self.order_volume)
-                        orders_ids = self.short(short_price, volume)
+                        ## 方式3：使用 min() 找最接近的价格
+                        closest_price, volume = self.getVolume(short_price)
+                        orders_ids = self.short(closest_price, volume)
                         for orderid in orders_ids:
                             self.short_orders_dict[orderid] = short_price
 
@@ -324,6 +327,9 @@ class FutureGridStrategy(CtaTemplate):
         self.put_event()
 
     def check_start_price_and_execute(self, current_price: float):
+        if self.start_price == 0:
+            self.start_price_triggered = True  # 标记启动价格已触发
+
         # if self.position != 0:
         #     self.start_price_triggered = True  # 存在的话，就是启动了
 
@@ -350,3 +356,65 @@ class FutureGridStrategy(CtaTemplate):
                         for orderid in orders_ids:
                             self.short_orders_dict[orderid] = price
                 self.start_price_triggered = True  # 标记启动价格已触发
+
+    def calculate_price_change_rate(self):
+        """
+        计算 price_volume_dict 中各个价格之间的变化率。
+        返回一个字典，键为价格对 (prev_price, current_price)，值为变化率。
+        """
+        if not self.price_volume_dict:
+            return {}
+
+        # 将价格排序
+        sorted_prices = sorted(self.price_volume_dict.keys())
+
+        # 计算变化率
+        change_rate_dict = {}
+        for i in range(1, len(sorted_prices)):
+            prev_price = sorted_prices[i - 1]
+            current_price = sorted_prices[i]
+            change_rate = (current_price - prev_price) / prev_price * 100  # 变化率（百分比）
+            change_rate_dict[(prev_price, current_price)] = change_rate
+            print(current_price,change_rate)
+
+        return change_rate_dict
+
+    def avoid_finished_orders(self):
+        symbol = self.vt_symbol.split(".")[0]
+        symbol = symbol.replace("USDT", "/USDT")
+        # 获取历史订单
+        fbinance = ccxt.binance()
+        binance_key4 = 'qBFimviRucbMNt9bcPKWBIrhrAqJpcGlPjDMkiIFj04GzhT0YNsLq9A1XU9IFC2Y'
+        binance_secret4 = 'UvkbgNauNOGMwYxnGbz81hFYbhGaEdNdFfirwLUIE72McPhc4eJOkSelS65Stbpu'
+        fbinance.apiKey = binance_key4
+        fbinance.secret = binance_secret4
+        fbinance.enableRateLimit = True
+        fbinance.password = '5601564a'
+        fbinance.options['defaultType'] = 'future'
+        fbinance.options["warnOnFetchOpenOrdersWithoutSymbol"] = False
+        fbinance.name = 'future-binance'
+
+        exchange = fbinance
+        orders = exchange.fetch_my_trades(symbol=symbol, limit=10)
+
+        self.set_avoid_finished_orders = set()
+        # 打印订单信息
+        for i, order in enumerate(orders):
+            print(f"订单 {i + 1}:")
+            print(f"  时间: {exchange.iso8601(order['timestamp'])}")
+            print(f"  交易对: {order['symbol']}")
+            print(f"  类型: {order['side']}")  # 买入(buy)或卖出(sell)
+            print(f"  数量: {order['amount']}")
+            print(f"  成交价格: {order['price']}")
+            print(f"  成交金额: {order['cost']}")
+            print(f"  手续费: {order['fee']['cost']} {order['fee']['currency']}")
+            print("-" * 30)
+
+            self.set_avoid_finished_orders.add(order['price'])
+
+    ## 使用 min() 找最接近的价格
+    def getVolume(self, price):
+        closest_price = min(self.price_volume_dict.keys(), key=lambda x: abs(x - price))
+        volume = self.price_volume_dict.get(closest_price, None)
+
+        return closest_price, volume

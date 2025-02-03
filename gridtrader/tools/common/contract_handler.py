@@ -15,6 +15,6 @@ class ContractHandler:
 
         # 将 price 按照 price_tick 进行舍入
         processed_price = (price // self.price_tick) * self.price_tick
-
+        processed_price = float(processed_price)
         # 返回处理后的价格（保留原始精度）
         return processed_price
