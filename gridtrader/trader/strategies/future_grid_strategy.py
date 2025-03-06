@@ -28,6 +28,7 @@ class FutureGridStrategy(CtaTemplate):
     max_open_orders = 5  # 最大同时挂单数
     order_amount = 5000  # 下单总金额
     start_price = 0.0  # 启动价格
+    stop_loss_price = 0.0  # 止损价格
     direction_int = 1  # 方向：1为多头，-1为空头
 
     # 变量
@@ -38,13 +39,17 @@ class FutureGridStrategy(CtaTemplate):
     start_price_triggered = False  # 启动价格是否已触发
     lower_grid_total_volume = 0.0  # 下方网格的总下单量
     upper_grid_total_volume = 0.0  # 上方网格的总下单量
+    first_order = True  # 标记是否是第一次下单
+    orders_dict = {}  # 存储所有订单的字典
 
-    parameters = ["upper_price", "bottom_price", "max_open_orders", "order_amount", "start_price", "direction_int"]
+    parameters = ["bottom_price", "upper_price",  "max_open_orders", "order_amount", "start_price", "direction_int","stop_loss_price"]
     variables = ["avg_price", "step_price", "trade_times", "price_volume_dict", "start_price_triggered",
                  "lower_grid_total_volume", "upper_grid_total_volume"]
 
     def __init__(self, cta_engine: CtaEngine, strategy_name, vt_symbol, setting):
         super().__init__(cta_engine, strategy_name, vt_symbol, setting)
+        self.is_sell_outed = False
+        self.exchange = self.create_exchange()  # 创建 ccxt 交易所实例
         self.long_orders_dict = {}  # 多单挂单字典
         self.short_orders_dict = {}  # 空单挂单字典
         self.tick: Union[TickData, None] = None
@@ -53,6 +58,25 @@ class FutureGridStrategy(CtaTemplate):
         self.timer_count = 0
         self._ContractHandler = None
         self.fake_active_orders_price_list = None
+
+    def create_exchange(self):
+        """创建 ccxt 交易所实例"""
+        # 获取历史订单
+        fbinance = ccxt.binance()
+        binance_key4 = 'qBFimviRucbMNt9bcPKWBIrhrAqJpcGlPjDMkiIFj04GzhT0YNsLq9A1XU9IFC2Y'
+        binance_secret4 = 'UvkbgNauNOGMwYxnGbz81hFYbhGaEdNdFfirwLUIE72McPhc4eJOkSelS65Stbpu'
+        fbinance.apiKey = binance_key4
+        fbinance.secret = binance_secret4
+        fbinance.enableRateLimit = True
+        fbinance.password = '5601564a'
+        fbinance.options['defaultType'] = 'future'
+        fbinance.options["warnOnFetchOpenOrdersWithoutSymbol"] = False
+        fbinance.name = 'future-binance'
+        fbinance.enableRateLimit = True
+
+        exchange = fbinance
+
+        return exchange
 
     def calculate_grid_parameters(self):
         """
@@ -81,9 +105,9 @@ class FutureGridStrategy(CtaTemplate):
             raise ValueError("价格区间设置错误，上限价格必须大于下限价格。")
 
         if self.vt_symbol.split(".")[0] == "BTCUSDT":
-            rate = 0.004
+            rate = 0.003
         else:
-            rate = 0.007
+            rate = 0.005
 
         # 初始网格数量
         grid_spacing = self.upper_price * rate  # 网格间距为下限价格的 0.6%
@@ -219,6 +243,13 @@ class FutureGridStrategy(CtaTemplate):
         if tick and tick.bid_price_1 > 0 and self.contract_data:
             self.tick = tick
 
+            # 检查是否达到止损价格
+            if self.stop_loss_price > 0 and tick.bid_price_1 <= self.stop_loss_price and not self.is_sell_outed:
+                self.write_log(f"触发止损，当前价格: {tick.bid_price_1}，止损价格: {self.stop_loss_price}")
+                self.on_stop()  # 触发停止功能
+                self.sell_market()  # 执行市价卖出
+                return
+
             if self.upper_price - self.bottom_price <= 0:
                 return
 
@@ -260,6 +291,11 @@ class FutureGridStrategy(CtaTemplate):
                     orders_ids = self.short(price, volume)
                     for orderid in orders_ids:
                         self.short_orders_dict[orderid] = price
+
+            # 第一次下单后，将标志设置为 False
+            if self.first_order:
+                self.first_order = False
+
     def on_order(self, order: OrderData):
         """订单状态回调"""
         if order.vt_orderid not in (list(self.short_orders_dict.keys()) + list(self.long_orders_dict.keys())):
@@ -270,46 +306,70 @@ class FutureGridStrategy(CtaTemplate):
         _ContractHandler = ContractHandler(self.contract_data.price_tick)
 
         if order.status == Status.ALLTRADED:
+            short_price = float(order.price) + float(self.step_price)
+            long_price = float(order.price) - float(self.step_price)
+
+            if not(long_price >= self.bottom_price and short_price <= self.upper_price):
+                return
+
             if order.vt_orderid in self.long_orders_dict.keys():
                 del self.long_orders_dict[order.vt_orderid]
                 self.trade_times += 1
 
-                short_price = float(order.price) + float(self.step_price)
+                # 使用 min() 找最接近的价格
+                short_price, volume = self.getVolume(short_price)
                 if short_price <= self.upper_price:
-                    ## 方式3：使用 min() 找最接近的价格
-                    closest_price, volume = self.getVolume(short_price)
-                    orders_ids = self.short(closest_price, volume)
-                    for orderid in orders_ids:
-                        self.short_orders_dict[orderid] = short_price
+                    if short_price in self.short_orders_dict.values():  # 检查是否已有该价格的订单
+                        self.write_log(f" short_price 跳过 {short_price}。")
+                        return
 
+                    orders_ids = self.short(short_price, volume)
+                    for orderid in orders_ids:
+                        self.short_orders_dict[orderid] = short_price  # 存储在总字典中
+
+                ## 补充买单
                 if len(self.long_orders_dict.keys()) < self.max_open_orders:
                     count = len(self.long_orders_dict.keys()) + 1
                     long_price = float(order.price) - float(self.step_price) * count
                     if long_price >= self.bottom_price:
                         ## 方式3：使用 min() 找最接近的价格
                         closest_price, volume = self.getVolume(long_price)
+
+                        if closest_price in self.long_orders_dict.values():  # 检查是否已有该价格的订单
+                            self.write_log(f" long_price 跳过 {closest_price}。")
+                            return
+
                         orders_ids = self.buy(closest_price, volume)
                         for orderid in orders_ids:
                             self.long_orders_dict[orderid] = long_price
 
             if order.vt_orderid in self.short_orders_dict.keys():
-                del self.short_orders_dict[order.vt_orderid]
+                del self.short_orders_dict[order.vt_orderid]  # 从总字典中删除已成交的订单
                 self.trade_times += 1
 
-                long_price = float(order.price) - float(self.step_price)
+                # 使用 min() 找最接近的价格
+                long_price, volume = self.getVolume(long_price)
                 if long_price >= self.bottom_price:
-                    ## 方式3：使用 min() 找最接近的价格
-                    closest_price, volume = self.getVolume(long_price)
-                    orders_ids = self.buy(closest_price, volume)
-                    for orderid in orders_ids:
-                        self.long_orders_dict[orderid] = long_price
+                    if long_price in self.long_orders_dict.values():  # 检查是否已有该价格的订单
+                        self.write_log(f" long_price 跳过 {long_price}。")
+                        return
 
+                    orders_ids = self.buy(long_price, volume)
+                    for orderid in orders_ids:
+                        self.long_orders_dict[orderid] = long_price  # 存储在总字典中
+
+                ## 补充卖单
                 if len(self.short_orders_dict.keys()) < self.max_open_orders:
                     count = len(self.short_orders_dict.keys()) + 1
                     short_price = float(order.price) + float(self.step_price) * count
                     if short_price <= self.upper_price:
                         ## 方式3：使用 min() 找最接近的价格
                         closest_price, volume = self.getVolume(short_price)
+
+                        if closest_price in self.short_orders_dict.values():  # 检查是否已有该价格的订单
+                            self.write_log(f" short_price 跳过 {closest_price}。")
+                            return
+
                         orders_ids = self.short(closest_price, volume)
                         for orderid in orders_ids:
                             self.short_orders_dict[orderid] = short_price
@@ -382,26 +442,13 @@ class FutureGridStrategy(CtaTemplate):
     def avoid_finished_orders(self):
         symbol = self.vt_symbol.split(".")[0]
         symbol = symbol.replace("USDT", "/USDT")
-        # 获取历史订单
-        fbinance = ccxt.binance()
-        binance_key4 = 'qBFimviRucbMNt9bcPKWBIrhrAqJpcGlPjDMkiIFj04GzhT0YNsLq9A1XU9IFC2Y'
-        binance_secret4 = 'UvkbgNauNOGMwYxnGbz81hFYbhGaEdNdFfirwLUIE72McPhc4eJOkSelS65Stbpu'
-        fbinance.apiKey = binance_key4
-        fbinance.secret = binance_secret4
-        fbinance.enableRateLimit = True
-        fbinance.password = '5601564a'
-        fbinance.options['defaultType'] = 'future'
-        fbinance.options["warnOnFetchOpenOrdersWithoutSymbol"] = False
-        fbinance.name = 'future-binance'
-
-        exchange = fbinance
-        orders = exchange.fetch_my_trades(symbol=symbol, limit=10)
+        orders = self.exchange.fetch_my_trades(symbol=symbol, limit=10)
 
         self.set_avoid_finished_orders = set()
         # 打印订单信息
         for i, order in enumerate(orders):
             print(f"订单 {i + 1}:")
-            print(f"  时间: {exchange.iso8601(order['timestamp'])}")
+            print(f"  时间: {self.exchange.iso8601(order['timestamp'])}")
             print(f"  交易对: {order['symbol']}")
             print(f"  类型: {order['side']}")  # 买入(buy)或卖出(sell)
             print(f"  数量: {order['amount']}")
@@ -418,3 +465,32 @@ class FutureGridStrategy(CtaTemplate):
         volume = self.price_volume_dict.get(closest_price, None)
 
         return closest_price, volume
+
+    def sell_market(self):
+        """市价卖出功能"""
+        symbol2 = self.vt_symbol.split(".")[0]  # 获取交易对
+        symbol = symbol2.replace("USDT", "/USDT")
+
+        # 获取合约账户余额信息
+        balance = self.exchange.fetch_balance({"type": "future"})
+        btc_positions = balance.get('info', {}).get('positions', [])
+
+        # 过滤出目标交易对的持仓
+        btc_position = next((pos for pos in btc_positions if pos["symbol"] == symbol2), None)
+
+        if not btc_position:
+            self.write_log(f"未持有 {symbol} 的仓位，无法执行市价卖出。")
+            return
+
+        position_amt = float(btc_position.get("positionAmt", 0))  # 获取仓位数量
+
+        if position_amt == 0:
+            self.write_log(f"{symbol} 持仓数量为 0，无法执行市价卖出。")
+            return
+
+        self.write_log(f"持有 {position_amt} 个 {symbol}，准备市价卖出。")
+
+        # 使用 ccxt 执行市价卖出
+        self.exchange.create_market_sell_order(symbol, abs(position_amt))
+        self.write_log(f"已市价卖出 {btc_position} 个 {symbol}。")
+        self.is_sell_outed = True
